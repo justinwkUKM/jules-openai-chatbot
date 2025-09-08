@@ -1,88 +1,63 @@
 import React, { useState } from 'react';
-import { ChatOpenAI } from "@langchain/openai";
-import { StateGraph } from "@langchain/langgraph";
-import { HumanMessage } from "@langchain/core/messages";
 
 const Agent = () => {
     const [input, setInput] = useState('');
     const [messages, setMessages] = useState([]);
     const [streamingResponse, setStreamingResponse] = useState('');
 
-    // Define the state for our graph
-    const graphState = {
-        messages: {
-            value: (x, y) => x.concat(y),
-            default: () => [],
-        },
-    };
-
-    // Define the graph
-    const workflow = new StateGraph({
-        channels: graphState,
-    });
-
-    const apiKey = process.env.REACT_APP_OPENAI_API_KEY || "YOUR_OPENAI_API_KEY";
-
-    // Define the model
-    const model = new ChatOpenAI({
-        apiKey: apiKey,
-        streaming: true,
-    });
-
-    // Define the function that calls the model
-    const callModel = async (state) => {
-        const { messages } = state;
-        const response = await model.invoke(messages);
-        return { messages: [response] };
-    };
-
-    // Add the node to the workflow
-    workflow.addNode("model", callModel);
-
-    // Set the entrypoint
-    workflow.setEntryPoint("model");
-
-    // Set the finish point
-    workflow.setFinishPoint("model");
-
-    // Compile the graph
-    const app = workflow.compile();
-
     const handleInputChange = (e) => {
         setInput(e.target.value);
     };
 
     const handleSendMessage = async () => {
-        if (!input.trim() || apiKey === "YOUR_OPENAI_API_KEY") return;
+        if (!input.trim()) return;
 
-        const userMessage = new HumanMessage(input);
-        setMessages([...messages, { type: 'user', text: input }]);
+        const newMessages = [...messages, { type: 'user', text: input }];
+        setMessages(newMessages);
         setInput('');
+        setStreamingResponse('...'); // Indicate that the agent is thinking
 
         try {
-            const stream = await app.stream({ messages: [userMessage] });
+            const response = await fetch('http://localhost:8000/chat/stream', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                },
+                // The backend expects a list of message objects
+                body: JSON.stringify(newMessages.map(msg => ({ role: msg.type, content: msg.text }))),
+            });
+
+            if (!response.body) return;
+
+            const reader = response.body.getReader();
+            const decoder = new TextDecoder();
             let fullResponse = '';
-            for await (const chunk of stream) {
-                if (chunk.model && chunk.model.messages) {
-                    // This logic might need adjustment based on the exact structure of the streaming chunks
-                    const message_chunk = chunk.model.messages[chunk.model.messages.length - 1];
-                    if (message_chunk && message_chunk.content) {
-                         const content = message_chunk.content;
-                        if (content) {
-                            fullResponse += content;
-                            setStreamingResponse(fullResponse);
-                        }
+            setStreamingResponse(''); // Clear the "thinking" indicator
+
+            while (true) {
+                const { done, value } = await reader.read();
+                if (done) break;
+
+                const chunk = decoder.decode(value);
+                // SSE sends data in "data: ..." format. We need to parse it.
+                const lines = chunk.split('\n');
+                for (const line of lines) {
+                    if (line.startsWith('data: ')) {
+                        const data = line.substring(6);
+                        fullResponse += data;
+                        setStreamingResponse(fullResponse);
                     }
                 }
             }
+
             setMessages(prev => [...prev, { type: 'agent', text: fullResponse }]);
             setStreamingResponse('');
         } catch (error) {
             console.error("Error streaming response:", error);
-            setMessages(prev => [...prev, { type: 'agent', text: "Sorry, I encountered an error." }]);
+            setStreamingResponse('');
+            setMessages(prev => [...prev, { type: 'agent', text: "Sorry, I encountered an error connecting to the backend." }]);
         }
     };
-
 
     return (
         <div>
@@ -98,24 +73,14 @@ const Agent = () => {
                     </div>
                 )}
             </div>
-            {apiKey === "YOUR_OPENAI_API_KEY" && (
-                <p style={{ color: 'red' }}>
-                    Please set your OpenAI API key in a .env file (REACT_APP_OPENAI_API_KEY) to use the chat.
-                </p>
-            )}
             <input
                 type="text"
                 value={input}
                 onChange={handleInputChange}
                 onKeyPress={(e) => e.key === 'Enter' && handleSendMessage()}
                 style={{ width: '80%', padding: '10px' }}
-                disabled={apiKey === "YOUR_OPENAI_API_KEY"}
             />
-            <button
-                onClick={handleSendMessage}
-                style={{ width: '19%', padding: '10px' }}
-                disabled={apiKey === "YOUR_OPENAI_API_KEY"}
-            >
+            <button onClick={handleSendMessage} style={{ width: '19%', padding: '10px' }}>
                 Send
             </button>
         </div>
